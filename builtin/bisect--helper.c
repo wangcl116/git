@@ -26,8 +26,8 @@ static const char * const git_bisect_helper_usage[] = {
 	N_("git bisect--helper --bisect-start [--term-{new,bad}=<term> --term-{old,good}=<term>]"
 					    " [--no-checkout] [--first-parent] [<bad> [<good>...]] [--] [<paths>...]"),
 	N_("git bisect--helper --bisect-next"),
-	N_("git bisect--helper --bisect-state (bad|new) [<rev>]"),
-	N_("git bisect--helper --bisect-state (good|old) [<rev>...]"),
+	N_("git bisect--helper [--bisect-state] (bad|new) [<rev>]"),
+	N_("git bisect--helper [--bisect-state] (good|old) [<rev>...]"),
 	N_("git bisect--helper --bisect-replay <filename>"),
 	N_("git bisect--helper --bisect-skip [(<rev>|<range>)...]"),
 	N_("git bisect--helper --bisect-visualize"),
@@ -1210,6 +1210,13 @@ int cmd_bisect__helper(int argc, const char **argv, const char *prefix)
 			     git_bisect_helper_usage,
 			     PARSE_OPT_KEEP_DASHDASH | PARSE_OPT_KEEP_UNKNOWN);
 
+	if (!cmdmode && argc > 0) {
+		set_terms(&terms, "bad", "good");
+		get_terms(&terms);
+		if (!check_and_set_terms(&terms, argv[0]))
+			cmdmode = BISECT_STATE;
+	}
+
 	if (!cmdmode)
 		usage_with_options(git_bisect_helper_usage, options);
 
@@ -1217,11 +1224,6 @@ int cmd_bisect__helper(int argc, const char **argv, const char *prefix)
 	case BISECT_START:
 		set_terms(&terms, "bad", "good");
 		res = bisect_start(&terms, argv, argc);
-		break;
-	case BISECT_STATE:
-		set_terms(&terms, "bad", "good");
-		get_terms(&terms);
-		res = bisect_state(&terms, argv, argc);
 		break;
 	case BISECT_TERMS:
 		if (argc > 1)
@@ -1264,6 +1266,13 @@ int cmd_bisect__helper(int argc, const char **argv, const char *prefix)
 			return error(_("bisect run failed: no command provided."));
 		get_terms(&terms);
 		res = bisect_run(&terms, argv, argc);
+		break;
+	case BISECT_STATE:
+		if (!terms.term_good) {
+			set_terms(&terms, "bad", "good");
+			get_terms(&terms);
+		}
+		res = bisect_state(&terms, argv, argc);
 		break;
 	default:
 		BUG("unknown subcommand %d", cmdmode);
