@@ -46,6 +46,12 @@ test_expect_success 'ls-tree --format=<name-only-like>' '
 		"--name-only"
 '
 
+test_expect_success 'ls-tree --format=<object-only-like>' '
+	test_ls_tree_format \
+		"%(objectname)" \
+		"--object-only"
+'
+
 test_expect_success 'ls-tree combine --format=<default-like> and -t' '
 	test_ls_tree_format \
 	"%(objectmode) %(objecttype) %(objectname)%x09%(path)" \
@@ -76,6 +82,12 @@ test_expect_success 'ls-tree hit fast-path with --format=<default-like>' '
 test_expect_success 'ls-tree hit fast-path with --format=<name-only-like>' '
 	git ls-tree -r --name-only HEAD >expect &&
 	git ls-tree --format="%(path)" -r HEAD >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'ls-tree hit fast-path with --format=<object-only-like>' '
+	git ls-tree -r --object-only HEAD >expect &&
+	git ls-tree --format="%(objectname)" -r HEAD >actual &&
 	test_cmp expect actual
 '
 test_done
