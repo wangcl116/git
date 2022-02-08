@@ -58,6 +58,19 @@ enum {
 
 static int cmdmode = MODE_UNSPECIFIED;
 
+static int fast_path(void){
+	if (!strcmp(format, default_format)) {
+		return 1;
+	} else if (!strcmp(format, long_format)) {
+		shown_fields = shown_fields | FIELD_SIZE;
+		return 1;
+	} else if (!strcmp(format, name_only_format)) {
+		shown_fields = FIELD_PATH_NAME;
+		return 1;
+	}
+	return 0;
+}
+
 static void expand_objectsize(struct strbuf *line, const struct object_id *oid,
 			      const enum object_type type, unsigned int padded)
 {
@@ -350,15 +363,7 @@ int cmd_ls_tree(int argc, const char **argv, const char *prefix)
 	 * The generic show_tree_fmt() is slower than show_tree(), so
 	 * take the fast path if possible.
 	 */
-	if (format && (!strcmp(format, default_format))) {
-		fn = show_tree;
-	} else if (format && (!strcmp(format, long_format))) {
-		shown_fields = shown_fields | FIELD_SIZE;
-		fn = show_tree;
-	} else if (format && (!strcmp(format, name_only_format))) {
-		shown_fields = FIELD_PATH_NAME;
-		fn = show_tree;
-	} else if (format)
+	if (format && !fast_path())
 		fn = show_tree_fmt;
 
 	return !!read_tree(the_repository, tree, &pathspec, fn, NULL);
