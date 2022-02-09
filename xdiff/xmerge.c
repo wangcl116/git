@@ -711,10 +711,18 @@ int xdl_merge(mmfile_t *orig, mmfile_t *mf1, mmfile_t *mf2,
 	status = 0;
 	if (!xscr1) {
 		result->ptr = xdl_malloc(mf2->size);
+		if (!result->ptr) {
+			status = -1;
+			goto out;
+		}
 		memcpy(result->ptr, mf2->ptr, mf2->size);
 		result->size = mf2->size;
 	} else if (!xscr2) {
 		result->ptr = xdl_malloc(mf1->size);
+		if (!result->ptr) {
+			status = -1;
+			goto out;
+		}
 		memcpy(result->ptr, mf1->ptr, mf1->size);
 		result->size = mf1->size;
 	} else {
