@@ -22,6 +22,7 @@
 #include "parse-options.h"
 #include "object-store.h"
 #include "commit-reach.h"
+#include "shallow.h"
 
 static int config_update_recurse_submodules = RECURSE_SUBMODULES_OFF;
 static int initialized_fetch_ref_tips;
@@ -900,6 +901,9 @@ static void collect_changed_submodules(struct repository *r,
 
 	save_warning = warn_on_object_refname_ambiguity;
 	warn_on_object_refname_ambiguity = 0;
+	/* make sure shallows are read */
+	is_repository_shallow(the_repository);
+
 	repo_init_revisions(r, &rev, NULL);
 	setup_revisions(argv->nr, argv->v, &rev, &s_r_opt);
 	warn_on_object_refname_ambiguity = save_warning;
@@ -1266,10 +1270,6 @@ static void calculate_changed_submodule_paths(struct repository *r,
 	struct strvec argv = STRVEC_INIT;
 	struct string_list_item *name;
 
-	/* No need to check if there are no submodules configured */
-	if (!submodule_from_path(r, NULL, NULL))
-		return;
-
 	strvec_push(&argv, "--"); /* argv[0] program name */
 	oid_array_for_each_unique(&ref_tips_after_fetch,
 				   append_oid_to_argv, &argv);
@@ -1340,7 +1340,8 @@ int submodule_touches_in_range(struct repository *r,
 }
 
 struct submodule_parallel_fetch {
-	int count;
+	int index_count;
+	int changed_count;
 	struct strvec args;
 	struct repository *r;
 	const char *prefix;
@@ -1350,6 +1351,7 @@ struct submodule_parallel_fetch {
 	int result;
 
 	struct string_list changed_submodule_names;
+	struct string_list seen_submodule_names;
 
 	/* Pending fetches by OIDs */
 	struct fetch_task **oid_fetch_tasks;
@@ -1360,6 +1362,7 @@ struct submodule_parallel_fetch {
 #define SPF_INIT { \
 	.args = STRVEC_INIT, \
 	.changed_submodule_names = STRING_LIST_INIT_DUP, \
+	.seen_submodule_names = STRING_LIST_INIT_DUP, \
 	.submodules_with_errors = STRBUF_INIT, \
 }
 
@@ -1474,11 +1477,12 @@ static struct repository *get_submodule_repo_for(struct repository *r,
 }
 
 static struct fetch_task *
-get_fetch_task(struct submodule_parallel_fetch *spf,
-	       const char **default_argv, struct strbuf *err)
+get_fetch_task_from_index(struct submodule_parallel_fetch *spf,
+			  const char **default_argv, struct strbuf *err)
 {
-	for (; spf->count < spf->r->index->cache_nr; spf->count++) {
-		const struct cache_entry *ce = spf->r->index->cache[spf->count];
+	for (; spf->index_count < spf->r->index->cache_nr; spf->index_count++) {
+		const struct cache_entry *ce =
+			spf->r->index->cache[spf->index_count];
 		struct fetch_task *task;
 
 		if (!S_ISGITLINK(ce->ce_mode))
@@ -1486,6 +1490,15 @@ get_fetch_task(struct submodule_parallel_fetch *spf,
 
 		task = fetch_task_create(spf->r, ce->name, null_oid());
 		if (!task)
+			continue;
+
+		/*
+		 * We might have already considered this submodule
+		 * because we saw it when iterating the changed
+		 * submodule names.
+		 */
+		if (string_list_lookup(&spf->seen_submodule_names,
+				       task->sub->name))
 			continue;
 
 		switch (get_fetch_recurse_config(task->sub, spf))
@@ -1535,7 +1548,69 @@ get_fetch_task(struct submodule_parallel_fetch *spf,
 			strbuf_addf(err, _("Fetching submodule %s%s\n"),
 				    spf->prefix, ce->name);
 
-		spf->count++;
+		spf->index_count++;
+		return task;
+	}
+	return NULL;
+}
+
+static struct fetch_task *
+get_fetch_task_from_changed(struct submodule_parallel_fetch *spf,
+			    const char **default_argv, struct strbuf *err)
+{
+	for (; spf->changed_count < spf->changed_submodule_names.nr;
+	     spf->changed_count++) {
+		struct string_list_item item =
+			spf->changed_submodule_names.items[spf->changed_count];
+		struct changed_submodule_data *cs_data = item.util;
+		struct fetch_task *task;
+
+		/*
+		 * We might have already considered this submodule
+		 * because we saw it in the index.
+		 */
+		if (string_list_lookup(&spf->seen_submodule_names, item.string))
+			continue;
+
+		task = fetch_task_create(spf->r, cs_data->path,
+					 cs_data->super_oid);
+		if (!task)
+			continue;
+
+		switch (get_fetch_recurse_config(task->sub, spf)) {
+		default:
+		case RECURSE_SUBMODULES_DEFAULT:
+		case RECURSE_SUBMODULES_ON_DEMAND:
+			*default_argv = "on-demand";
+			break;
+		case RECURSE_SUBMODULES_ON:
+			*default_argv = "yes";
+			break;
+		case RECURSE_SUBMODULES_OFF:
+			continue;
+		}
+
+		task->repo = get_submodule_repo_for(spf->r, task->sub->path,
+						    cs_data->super_oid);
+		if (!task->repo) {
+			fetch_task_release(task);
+			free(task);
+
+			strbuf_addf(err, _("Could not access submodule '%s'\n"),
+				    cs_data->path);
+			continue;
+		}
+		if (!is_tree_submodule_active(spf->r, cs_data->super_oid,
+					      task->sub->path))
+			continue;
+
+		if (!spf->quiet)
+			strbuf_addf(err,
+				    _("Fetching submodule %s%s at commit %s\n"),
+				    spf->prefix, task->sub->path,
+				    find_unique_abbrev(cs_data->super_oid,
+						       DEFAULT_ABBREV));
+		spf->changed_count++;
 		return task;
 	}
 	return NULL;
@@ -1546,7 +1621,10 @@ static int get_next_submodule(struct child_process *cp, struct strbuf *err,
 {
 	struct submodule_parallel_fetch *spf = data;
 	const char *default_argv = NULL;
-	struct fetch_task *task = get_fetch_task(spf, &default_argv, err);
+	struct fetch_task *task =
+		get_fetch_task_from_index(spf, &default_argv, err);
+	if (!task)
+		task = get_fetch_task_from_changed(spf, &default_argv, err);
 
 	if (task) {
 		struct strbuf submodule_prefix = STRBUF_INIT;
@@ -1566,6 +1644,7 @@ static int get_next_submodule(struct child_process *cp, struct strbuf *err,
 		*task_cb = task;
 
 		strbuf_release(&submodule_prefix);
+		string_list_insert(&spf->seen_submodule_names, task->sub->name);
 		return 1;
 	}
 
