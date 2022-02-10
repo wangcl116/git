@@ -804,6 +804,16 @@ static const char *default_name_or_path(const char *path_or_name)
  * member of the changed submodule string_list_item.
  */
 struct changed_submodule_data {
+	/*
+	 * The first superproject commit in the rev walk that points to the
+	 * submodule.
+	 */
+	const struct object_id *super_oid;
+	/*
+	 * Path to the submodule in the superproject commit referenced
+	 * by 'super_oid'.
+	 */
+	char *path;
 	/* The submodule commits that have changed in the rev walk. */
 	struct oid_array *new_commits;
 };
@@ -812,6 +822,7 @@ static void changed_submodule_data_clear(struct changed_submodule_data *cs_data)
 {
 	oid_array_clear(cs_data->new_commits);
 	free(cs_data->new_commits);
+	free(cs_data->path);
 }
 
 static void collect_changed_submodules_cb(struct diff_queue_struct *q,
@@ -862,6 +873,8 @@ static void collect_changed_submodules_cb(struct diff_queue_struct *q,
 			cs_data = xcalloc(1, sizeof(struct changed_submodule_data));
 			/* NEEDSWORK: should we have oid_array_init()? */
 			cs_data->new_commits = xcalloc(1, sizeof(struct oid_array));
+			cs_data->super_oid = commit_oid;
+			cs_data->path = xstrdup(p->two->path);
 			item->util = cs_data;
 		}
 		oid_array_append(cs_data->new_commits, &p->two->oid);
@@ -937,6 +950,7 @@ struct has_commit_data {
 	struct repository *repo;
 	int result;
 	const char *path;
+	const struct object_id *super_oid;
 };
 
 static int check_has_commit(const struct object_id *oid, void *data)
@@ -945,7 +959,7 @@ static int check_has_commit(const struct object_id *oid, void *data)
 	struct repository subrepo;
 	enum object_type type;
 
-	if (repo_submodule_init(&subrepo, cb->repo, cb->path, null_oid())) {
+	if (repo_submodule_init(&subrepo, cb->repo, cb->path, cb->super_oid)) {
 		cb->result = 0;
 		goto cleanup;
 	}
@@ -973,9 +987,10 @@ cleanup:
 
 static int submodule_has_commits(struct repository *r,
 				 const char *path,
+				 const struct object_id *super_oid,
 				 struct oid_array *commits)
 {
-	struct has_commit_data has_commit = { r, 1, path };
+	struct has_commit_data has_commit = { r, 1, path, super_oid };
 
 	/*
 	 * Perform a cheap, but incorrect check for the existence of 'commits'.
@@ -1022,7 +1037,7 @@ static int submodule_needs_pushing(struct repository *r,
 				   const char *path,
 				   struct oid_array *commits)
 {
-	if (!submodule_has_commits(r, path, commits))
+	if (!submodule_has_commits(r, path, null_oid(), commits))
 		/*
 		 * NOTE: We do consider it safe to return "no" here. The
 		 * correct answer would be "We do not know" instead of
@@ -1273,7 +1288,7 @@ static void calculate_changed_submodule_paths(struct repository *r,
 		const struct submodule *submodule;
 		const char *path = NULL;
 
-		submodule = submodule_from_name(r, null_oid(), name->string);
+		submodule = submodule_from_name(r, cs_data->super_oid, name->string);
 		if (submodule)
 			path = submodule->path;
 		else
@@ -1282,7 +1297,7 @@ static void calculate_changed_submodule_paths(struct repository *r,
 		if (!path)
 			continue;
 
-		if (submodule_has_commits(r, path, cs_data->new_commits)) {
+		if (submodule_has_commits(r, path, cs_data->super_oid, cs_data->new_commits)) {
 			oid_array_clear(cs_data->new_commits);
 			*name->string = '\0';
 		}
@@ -1407,12 +1422,13 @@ static const struct submodule *get_non_gitmodules_submodule(const char *path)
 }
 
 static struct fetch_task *fetch_task_create(struct repository *r,
-					    const char *path)
+					    const char *path,
+					    const struct object_id *treeish_name)
 {
 	struct fetch_task *task = xmalloc(sizeof(*task));
 	memset(task, 0, sizeof(*task));
 
-	task->sub = submodule_from_path(r, null_oid(), path);
+	task->sub = submodule_from_path(r, treeish_name, path);
 	if (!task->sub) {
 		/*
 		 * No entry in .gitmodules? Technically not a submodule,
@@ -1444,11 +1460,12 @@ static void fetch_task_release(struct fetch_task *p)
 }
 
 static struct repository *get_submodule_repo_for(struct repository *r,
-						 const char *path)
+						 const char *path,
+						 const struct object_id *treeish_name)
 {
 	struct repository *ret = xmalloc(sizeof(*ret));
 
-	if (repo_submodule_init(ret, r, path, null_oid())) {
+	if (repo_submodule_init(ret, r, path, treeish_name)) {
 		free(ret);
 		return NULL;
 	}
@@ -1469,7 +1486,7 @@ static int get_next_submodule(struct child_process *cp,
 		if (!S_ISGITLINK(ce->ce_mode))
 			continue;
 
-		task = fetch_task_create(spf->r, ce->name);
+		task = fetch_task_create(spf->r, ce->name, null_oid());
 		if (!task)
 			continue;
 
@@ -1492,7 +1509,7 @@ static int get_next_submodule(struct child_process *cp,
 			continue;
 		}
 
-		task->repo = get_submodule_repo_for(spf->r, task->sub->path);
+		task->repo = get_submodule_repo_for(spf->r, task->sub->path, null_oid());
 		if (task->repo) {
 			struct strbuf submodule_prefix = STRBUF_INIT;
 			child_process_init(cp);
